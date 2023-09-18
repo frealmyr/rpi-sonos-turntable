@@ -1,0 +1,5 @@
+all:
+  hosts:
+    turntable:
+      ansible_host: 192.168.0.30
+      ansible_user: fredrick

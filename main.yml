@@ -1,0 +1,273 @@
+---
+- hosts: all
+  become: true
+
+  tasks:
+    ##################
+    ## APT Packages ##
+    ##################
+
+    - name: apt - update & upgrade packages
+      apt:
+        upgrade: full
+        update_cache: yes
+        cache_valid_time: 3600
+      register: package_upgrade
+
+    - name: system - reboot (kernel update)
+      reboot:
+      when: package_upgrade.changed
+
+    - name: apt - install misc packages
+      apt:
+        name: "{{ packages }}"
+        state: present
+        update_cache: yes
+      vars:
+        packages:
+          - darkice
+          - icecast2
+
+    ################
+    ## RPi Tweaks ##
+    ################
+
+    - name: rpi - set config parameters
+      lineinfile:
+        path: /boot/config.txt
+        regexp: "{{ item.find }}"
+        line: "{{ item.value }}"
+        state: present
+      with_items:
+        - find: ^gpu_mem=.*
+          value: gpu_mem=16
+        - find: ^dtoverlay=disable-bt
+          value: dtoverlay=disable-bt
+        - find: ^camera_auto_detect=.*
+          value: camera_auto_detect=0
+        - find: ^display_auto_detect=.*
+          value: display_auto_detect=0
+        - find: ^dtoverlay=vc4-kms-v3d
+          value: "#dtoverlay=vc4-kms-v3d"
+
+    ## List generated using values from `systemd-analyze blame`
+    - name: rpi - disable services
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+        masked: yes
+        state: stopped
+      with_items:
+        - apt-daily-upgrade.service
+        - cups.service
+        - gldriver-test.service
+        - hciuart.service
+        - keyboard-setup.service
+        - man-db.timer
+        - ModemManager.service
+        - raspi-config.service
+        - rc-local
+        - rpi-eeprom-update.service
+        - systemd-rfkill.service
+        - triggerhappy.service
+
+    - name: rpi - speed up dhcp resolving
+      lineinfile:
+        line: "{{ item }}"
+        dest: /etc/dhcpcd.conf
+      with_items:
+        - noarp
+        - ipv4only
+        - noipv6
+
+    - name: rpi - fstab move logs to RAM
+      lineinfile:
+        path: /etc/fstab
+        regexp: "^tmpfs \/var\/log.*"
+        line: "tmpfs /var/log tmpfs defaults,noatime,mode=0755 0 0"
+        state: present
+
+    # - name: rpi - underclock to 600mhz
+    #   lineinfile:
+    #     path: /boot/config.txt
+    #     regexp: "{{ item.find }}"
+    #     line: "{{ item.value }}"
+    #     state: present
+    #   with_items:
+    #     - find: .*arm_freq=.*
+    #       value: arm_freq=600
+    #     - find: .*arm_freq_min=.*
+    #       value: arm_freq_min=600
+    #     - find: .*over_voltage=.*
+    #       value: over_voltage=-8
+    #     - find: .*over_voltage_min=.*
+    #       value: over_voltage_min=-8
+
+
+    ##########
+    ## Swap ##
+    ##########
+
+    - name: swap - remove swapfile from /etc/fstab if it exist
+      mount:
+        name: "{{ item }}"
+        fstype: swap
+        state: absent
+      with_items:
+        - none
+        - swap
+
+    - name: swap - mask swap dphys service
+      service:
+        name: dphys-swapfile
+        enabled: no
+        masked: yes
+        state: stopped
+
+    - name: swap - disable swap
+      command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+
+    ###################
+    ## Configuration ##
+    ###################
+
+    ## Use `aplay -l` to figure out the card name
+    - name: configure - alsa
+      copy:
+        dest: /etc/asound.conf
+        content: "{{ content }}"
+      vars:
+        content: |
+          pcm.dmic_hw {
+              type hw
+              card CODEC
+              channels 2
+              format dat
+          }
+
+          pcm.dmic_mm {
+              type mmap_emul
+              slave.pcm dmic_hw
+          }
+
+          pcm.dmic_sv {
+              type softvol
+              slave.pcm dmic_hw
+              control {
+                  name "Boost Capture Volume"
+                  card CODEC
+              }
+              min_dB -5.0
+              max_dB 20.0
+          }
+
+    - name: configure - darkice
+      copy:
+        dest: /etc/darkice.cfg
+        content: "{{ content }}"
+      vars:
+        content: |
+          # this section describes general aspects of the live streaming session
+          [general]
+          duration        = 0         # duration of encoding, in seconds. 0 means forever
+          bufferSecs      = 1         # size of internal slip buffer, in seconds
+          reconnect       = yes       # reconnect to the server(s) if disconnected
+          realtime        = yes       # run the encoder with POSIX realtime priority (default==yes)
+          rtprio          = 4         # scheduling priority for the realtime threads (default==4)
+
+          # this section describes the audio input that will be streamed
+          [input]
+          device          = dmic_hw    # OSS DSP soundcard device for the audio input
+          # device          = dmic_sv    # OSS DSP soundcard device for the audio input, with software pre-amp
+          sampleRate      = 48000     # other settings have crackling audo, esp. 44100
+          bitsPerSample   = 16        # bits per sample. try 16
+          channel         = 2         # channels. 1 = mono, 2 = stereo
+
+          # this section describes a streaming connection to an IceCast2 server
+          # there may be up to 8 of these sections, named [icecast2-0] ... [icecast2-7]
+          # these can be mixed with [icecast-x] and [shoutcast-x] sections
+          [icecast2-0]
+          bitrateMode     = cbr
+          format          = mp3
+          bitrate         = 320
+          server          = localhost
+          port            = 8000
+          mountPoint      = turntable
+          name            = AT-LP5 Turntable
+          description     = AT-LP5 Turntable
+          #highpass        = 18
+          #lowpass         = 20000
+          url             = http://localhost:8000/
+          password        = hackme   # or whatever you set your icecast2 password to
+
+    # Fixes a permission bug which prevents icecast2 from starting
+    - name: create directory for icecast2 logs
+      file:
+        path: /var/log/icecast2
+        state: directory
+        owner: icecast2
+        group: icecast
+
+    ###################
+    ## Startup items ##
+    ###################
+
+    - name: startup - remove old init.d based entries
+      shell: |
+        update-rc.d -f darkice remove
+        update-rc.d -f icecast2 remove
+
+    - name: systemd - create darkice service file
+      copy:
+        dest: /etc/systemd/system/darkice.service
+        content: "{{ content }}"
+      vars:
+        content: |
+          [Unit]
+          Description=DarkIce Icecast Network Audio Streamer
+          After=icecast.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/darkice -c /etc/darkice.cfg
+          ExecReload=/bin/kill -HUP $MAINPID
+          User=root
+          Group=root
+          #WorkingDirectory=/usr/share/icecast2/
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: systemd - create icecast2 service file
+      copy:
+        dest: /etc/systemd/system/icecast2.service
+        content: "{{ content }}"
+      vars:
+        content: |
+          [Unit]
+          Description=Icecast Network Audio Streaming Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/icecast2 -c /etc/icecast2/icecast.xml
+          ExecReload=/bin/kill -HUP $MAINPID
+          User=icecast2
+          Group=icecast
+          #WorkingDirectory=/usr/share/icecast2/
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: systemd - enable and start services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      with_items:
+        - darkice
+        - icecast2
