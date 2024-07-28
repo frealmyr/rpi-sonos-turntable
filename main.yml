@@ -201,14 +201,6 @@
           url             = http://localhost:8000/
           password        = hackme   # or whatever you set your icecast2 password to
 
-    # Fixes a permission bug which prevents icecast2 from starting
-    - name: create directory for icecast2 logs
-      file:
-        path: /var/log/icecast2
-        state: directory
-        owner: icecast2
-        group: icecast
-
     ###################
     ## Startup items ##
     ###################
@@ -258,6 +250,9 @@
           User=icecast2
           Group=icecast
           #WorkingDirectory=/usr/share/icecast2/
+          LogsDirectory=icecast2
+          LogsDirectoryOwner=icecast2
+          LogsDirectoryGroup=icecast
           Restart=always
 
           [Install]
